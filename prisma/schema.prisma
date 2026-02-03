@@ -1,0 +1,134 @@
+// prisma/schema.prisma
+
+datasource db {
+  provider = "sqlite"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum TireType {
+  LEGER
+  LOURD
+}
+
+enum RequestStatus {
+  EN_ATTENTE
+  EN_PREPARATION
+  PRET
+  LIVRE
+}
+
+enum UserStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum UserRole {
+  USER
+  SELLER
+  ADMIN
+}
+
+model User {
+  id              String     @id @default(uuid())
+  firstName       String
+  lastName        String
+  email           String     @unique
+  passwordHash    String     @map("password_hash")
+  phone           String
+  ninEncrypted    String     @map("nin_encrypted")
+  cardIdEncrypted String     @map("card_id_encrypted")
+  carteGriseEnc   String     @map("carte_grise_encrypted")
+  role            UserRole   @default(USER)
+  status          UserStatus @default(PENDING)
+  
+  // Document paths stored in S3/local
+  ninDocPath      String?    @map("nin_doc_path")
+  cardIdDocPath   String?    @map("card_id_doc_path")
+  carteGriseDocPath String?  @map("carte_grise_doc_path")
+  
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  requests        TireRequest[]
+
+  @@index([email])
+  @@index([status])
+  sellers Seller[]
+}
+
+model Seller {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  stationId String
+  user      User     @relation(fields: [userId], references: [id])
+  station   Station  @relation(fields: [stationId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([stationId])
+}
+
+model Tire {
+  id        String        @id @default(uuid())
+  dimension String
+  brand     String?
+  price     Decimal
+  stock     Int           @default(0)
+  type      TireType
+  requests  TireRequest[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+}
+
+model Station {
+  id        String        @id @default(uuid())
+  name      String
+  wilaya    String
+  address   String
+  latitude  Float
+  longitude Float
+  sellers   Seller[]
+  requests  TireRequest[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([wilaya])
+}
+
+model TireRequest {
+  id            String        @id @default(uuid())
+  userId        String
+  tireId        String
+  stationId     String?
+  status        RequestStatus @default(EN_ATTENTE)
+  qrCodeHash    String        @unique
+  qrUsed        Boolean       @default(false)
+  deliveredAt   DateTime?
+  year          Int
+  quantity      Int           @default(1)
+  user          User          @relation(fields: [userId], references: [id])
+  tire          Tire          @relation(fields: [tireId], references: [id])
+  station       Station?      @relation(fields: [stationId], references: [id])
+  statusHistory TireRequestStatusHistory[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([userId, year])
+  @@index([status])
+  @@index([stationId])
+}
+
+model TireRequestStatusHistory {
+  id        String        @id @default(uuid())
+  requestId String
+  status    RequestStatus
+  changedBy String?
+  note      String?
+  createdAt DateTime      @default(now())
+  request   TireRequest   @relation(fields: [requestId], references: [id])
+
+  @@index([requestId])
+}
