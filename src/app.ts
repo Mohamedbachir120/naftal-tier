@@ -8,7 +8,6 @@ import authPlugin from './plugin/auth.js';
 import storagePlugin from './plugin/storage.js';
 import authRoutes from './modules/auth/auth.routes.js';
 import requestsRoutes from './modules/requests/requests.routes.js';
-import sellersRoutes from './modules/sellers/seller.routes.js';
 import tiersRoutes from './modules/tiers/tiers.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -48,7 +47,6 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Register routes
   await app.register(authRoutes, { prefix: '/api/auth' });
   await app.register(requestsRoutes, { prefix: '/api/requests' });
-  await app.register(sellersRoutes, { prefix: '/api/seller' });
   await app.register(tiersRoutes, { prefix: '/api/tires' });
 
   return app;

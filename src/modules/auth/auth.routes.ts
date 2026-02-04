@@ -36,8 +36,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       const validatedInput = registerSchema.parse(fields);
 
       const user = await authService.register(validatedInput, {
-        ninDoc: files.ninDoc,
-        cardIdDoc: files.cardIdDoc,
+     
         carteGriseDoc: files.carteGriseDoc,
       });
 

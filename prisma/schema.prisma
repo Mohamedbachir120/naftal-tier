@@ -18,12 +18,7 @@ enum RequestStatus {
   EN_PREPARATION
   PRET
   LIVRE
-}
-
-enum UserStatus {
-  PENDING
-  APPROVED
-  REJECTED
+  ANNULE // Added CANCELLED just in case
 }
 
 enum UserRole {
@@ -33,86 +28,105 @@ enum UserRole {
 }
 
 model User {
-  id              String     @id @default(uuid())
-  firstName       String
-  lastName        String
-  email           String     @unique
-  passwordHash    String     @map("password_hash")
-  phone           String
-  ninEncrypted    String     @map("nin_encrypted")
-  cardIdEncrypted String     @map("card_id_encrypted")
-  carteGriseEnc   String     @map("carte_grise_encrypted")
-  role            UserRole   @default(USER)
-  status          UserStatus @default(PENDING)
+  id             String   @id @default(uuid())
+  firstName      String
+  lastName       String
+  phone          String   @unique // Phone should likely be unique for login
+  // Password is optional because waitlist users might migrate to Users later, 
+  // or if you use OTP login. If password is required for all: keep it required.
+  passwordHash   String?  @map("password_hash") 
   
-  // Document paths stored in S3/local
-  ninDocPath      String?    @map("nin_doc_path")
-  cardIdDocPath   String?    @map("card_id_doc_path")
-  carteGriseDocPath String?  @map("carte_grise_doc_path")
+  // OCR & Carte Grise Logic
+  carteGriseDocPath String? @map("carte_grise_doc_path")
+  carteGriseNum     String? @map("carte_grise_num")       // The final number (edited by user)
+  carteGriseRawOCR  String? @map("carte_grise_raw_ocr")   // The original OCR result (Audit log)
   
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
-  requests        TireRequest[]
+  role           UserRole @default(USER)
+  
+  // Removed UserStatus (Pending/Approved) if not strictly needed, 
+  // or keep if you manually approve users.
+  isVerified     Boolean  @default(false)
 
-  @@index([email])
-  @@index([status])
-  sellers Seller[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  requests       TireRequest[]
+
+  @@index([phone])
 }
 
-model Seller {
-  id        String   @id @default(uuid())
-  userId    String   @unique
-  stationId String
-  user      User     @relation(fields: [userId], references: [id])
-  station   Station  @relation(fields: [stationId], references: [id])
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([stationId])
-}
-
+// This acts as your Product Catalog (matches your Frontend JSON)
 model Tire {
-  id        String        @id @default(uuid())
-  dimension String
-  brand     String?
-  price     Decimal
-  stock     Int           @default(0)
-  type      TireType
-  requests  TireRequest[]
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  id          String   @id @default(uuid())
+  code        String   @unique // The "Code Produit"
+  dimension   String
+  brand       String?
+  price       Decimal
+  type        TireType
+  
+  // Removed "stock" from here. Stock belongs to a Station, not the abstract Tire.
+  
+  inventory   StationInventory[] // Relation to stock in specific stations
+  requests    TireRequest[]
+  waitlist    Waitlist[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 model Station {
-  id        String        @id @default(uuid())
+  id        String   @id @default(uuid())
   name      String
   wilaya    String
   address   String
   latitude  Float
   longitude Float
-  sellers   Seller[]
+  
+  inventory StationInventory[] // Stocks at this station
   requests  TireRequest[]
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([wilaya])
+}
+
+// NEW: Link between Station and Tire to track Stock
+model StationInventory {
+  id        String   @id @default(uuid())
+  stationId String
+  tireId    String
+  quantity  Int      @default(0) // This is the Single Source of Truth for SQL. Redis is a cache of this.
+
+  station   Station  @relation(fields: [stationId], references: [id])
+  tire      Tire     @relation(fields: [tireId], references: [id])
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([stationId, tireId]) // Ensure a station can't have duplicate entries for the same tire
 }
 
 model TireRequest {
   id            String        @id @default(uuid())
   userId        String
   tireId        String
-  stationId     String?
+  stationId     String
+  
   status        RequestStatus @default(EN_ATTENTE)
+  
   qrCodeHash    String        @unique
   qrUsed        Boolean       @default(false)
   deliveredAt   DateTime?
-  year          Int
+  
+  year          Int           // e.g., 2025 (to limit quotas per year)
   quantity      Int           @default(1)
+
   user          User          @relation(fields: [userId], references: [id])
   tire          Tire          @relation(fields: [tireId], references: [id])
-  station       Station?      @relation(fields: [stationId], references: [id])
+  station       Station       @relation(fields: [stationId], references: [id])
+  
   statusHistory TireRequestStatusHistory[]
+
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
@@ -125,10 +139,32 @@ model TireRequestStatusHistory {
   id        String        @id @default(uuid())
   requestId String
   status    RequestStatus
-  changedBy String?
+  changedBy String?       // ID of admin/seller who changed it
   note      String?
   createdAt DateTime      @default(now())
+  
   request   TireRequest   @relation(fields: [requestId], references: [id])
-
+  
   @@index([requestId])
+}
+
+// NEW: For people waiting for stock
+model Waitlist {
+  id        String   @id @default(uuid())
+  
+  // Basic contact info (No user account required yet)
+  firstName String
+  lastName  String
+  phone     String
+  
+  tireId    String   // What are they waiting for?
+  wilaya    String?  // Optional: Only notify if stock appears in this Wilaya
+  
+  notified  Boolean  @default(false) // Set true when SMS is sent
+  createdAt DateTime @default(now())
+
+  tire      Tire     @relation(fields: [tireId], references: [id])
+  
+  @@index([tireId])
+  @@index([phone])
 }

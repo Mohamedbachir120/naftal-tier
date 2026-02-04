@@ -2,54 +2,36 @@
 import { FastifyInstance } from 'fastify';
 import { RegisterInput, LoginInput } from './auth.schema.js';
 import { cryptoUtils } from '../../utils/crypto.js';
-import { UserStatus } from '@prisma/client';
+// Removed UserStatus import, using boolean isVerified instead
 
 export class AuthService {
   constructor(private fastify: FastifyInstance) {}
 
   async register(
-    input: RegisterInput,
+    input: RegisterInput, // Assumes input now has: firstName, lastName, phone, password
     files: {
-      ninDoc?: { filename: string; stream: NodeJS.ReadableStream; mimetype: string };
-      cardIdDoc?: { filename: string; stream: NodeJS.ReadableStream; mimetype: string };
       carteGriseDoc?: { filename: string; stream: NodeJS.ReadableStream; mimetype: string };
     }
   ) {
-    // Check if user already exists
+    // 1. Check if user already exists (By PHONE, not Email)
     const existingUser = await this.fastify.prisma.user.findUnique({
-      where: { email: input.email },
+      where: { phone: input.phone },
     });
 
     if (existingUser) {
-      throw new Error('User with this email already exists');
+      throw new Error('User with this phone number already exists');
     }
 
-    // Encrypt sensitive data
-    const ninEncrypted = cryptoUtils.encrypt(input.nin);
-    const cardIdEncrypted = cryptoUtils.encrypt(input.cardId);
-    const carteGriseEnc = cryptoUtils.encrypt(input.carteGrise);
-    const passwordHash = await cryptoUtils.hashPassword(input.password);
+    // 2. Hash Password (No encryption needed for NIN/CardID anymore)
+    // Note: If you allow waitlist users to register later, you might handle empty passwords here, 
+    // but for now we assume standard registration.
+    const passwordHash = input.password 
+      ? await cryptoUtils.hashPassword(input.password) 
+      : null;
 
-    // Upload documents
-    let ninDocPath: string | undefined;
-    let cardIdDocPath: string | undefined;
+    // 3. Upload Document (Only Carte Grise is required now)
     let carteGriseDocPath: string | undefined;
-
-    if (files.ninDoc) {
-      ninDocPath = await this.fastify.storage.uploadFile(
-        files.ninDoc.filename,
-        files.ninDoc.stream,
-        files.ninDoc.mimetype
-      );
-    }
-
-    if (files.cardIdDoc) {
-      cardIdDocPath = await this.fastify.storage.uploadFile(
-        files.cardIdDoc.filename,
-        files.cardIdDoc.stream,
-        files.cardIdDoc.mimetype
-      );
-    }
+    let ocrResultText = ""; 
 
     if (files.carteGriseDoc) {
       carteGriseDocPath = await this.fastify.storage.uploadFile(
@@ -57,32 +39,36 @@ export class AuthService {
         files.carteGriseDoc.stream,
         files.carteGriseDoc.mimetype
       );
+
+      // TODO: Integrate your actual OCR Service here (e.g., Tesseract, Google Vision)
+      // For now, we simulate extraction.
+      // ocrResultText = await this.ocrService.extractText(carteGriseDocPath);
+      ocrResultText = "OCR_PENDING_EXTRACTION"; 
     }
 
-    // Create user
+    // 4. Create user
     const user = await this.fastify.prisma.user.create({
       data: {
         firstName: input.firstName,
         lastName: input.lastName,
-        email: input.email,
-        passwordHash,
         phone: input.phone,
-        ninEncrypted,
-        cardIdEncrypted,
-        carteGriseEnc,
-        ninDocPath,
-        cardIdDocPath,
+        passwordHash,
+        
+        // Document & OCR Data
         carteGriseDocPath,
-        status: 'PENDING',
+        carteGriseRawOCR: ocrResultText, // Immutable Audit log
+        carteGriseNum: ocrResultText,    // Editable active number (initially same as OCR)
+        
+        // Defaults
+        isVerified: false, // Replaces status: PENDING
         role: 'USER',
       },
       select: {
         id: true,
         firstName: true,
         lastName: true,
-        email: true,
         phone: true,
-        status: true,
+        isVerified: true,
         role: true,
         createdAt: true,
       },
@@ -92,26 +78,28 @@ export class AuthService {
   }
 
   async login(input: LoginInput) {
+    // 1. Find by Phone
     const user = await this.fastify.prisma.user.findUnique({
-      where: { email: input.email },
+      where: { phone: input.phone },
     });
 
-    if (!user) {
-      throw new Error('Invalid email or password');
+    if (!user || !user.passwordHash) {
+      throw new Error('Invalid phone number or password');
     }
 
+    // 2. Verify Password
     const isValidPassword = await cryptoUtils.verifyPassword(input.password, user.passwordHash);
 
     if (!isValidPassword) {
-      throw new Error('Invalid email or password');
+      throw new Error('Invalid phone number or password');
     }
 
-    // Generate JWT token
+    // 3. Generate JWT token
     const token = this.fastify.jwt.sign({
       id: user.id,
-      email: user.email,
+      phone: user.phone,
       role: user.role,
-      status: user.status,
+      status: user.isVerified ? 'APPROVED' : 'PENDING', // Simplified status for token
     });
 
     return {
@@ -120,9 +108,9 @@ export class AuthService {
         id: user.id,
         firstName: user.firstName,
         lastName: user.lastName,
-        email: user.email,
+        phone: user.phone,
         role: user.role,
-        status: user.status,
+        isVerified: user.isVerified,
       },
     };
   }
@@ -132,8 +120,8 @@ export class AuthService {
       where: { id: userId },
       select: {
         id: true,
-        email: true,
-        status: true,
+        phone: true,
+        isVerified: true, // Boolean check
         createdAt: true,
         updatedAt: true,
       },
@@ -143,25 +131,15 @@ export class AuthService {
       throw new Error('User not found');
     }
 
+    // Logic updated for boolean isVerified
     return {
-      status: user.status,
-      message: this.getStatusMessage(user.status),
+      isVerified: user.isVerified,
+      message: user.isVerified 
+        ? 'Your account is verified. You can make tire requests.' 
+        : 'Your registration is pending verification of your Carte Grise.',
       registeredAt: user.createdAt,
       lastUpdated: user.updatedAt,
     };
-  }
-
-  private getStatusMessage(status: UserStatus): string {
-    switch (status) {
-      case 'PENDING':
-        return 'Your registration is pending admin approval. Please wait for verification.';
-      case 'APPROVED':
-        return 'Your registration has been approved. You can now make tire requests.';
-      case 'REJECTED':
-        return 'Your registration has been rejected. Please contact support for more information.';
-      default:
-        return 'Unknown status';
-    }
   }
 
   async getProfile(userId: string) {
@@ -171,10 +149,11 @@ export class AuthService {
         id: true,
         firstName: true,
         lastName: true,
-        email: true,
         phone: true,
+        // Removed email
+        carteGriseNum: true, // Useful for user to see their verified number
         role: true,
-        status: true,
+        isVerified: true,
         createdAt: true,
         updatedAt: true,
       },

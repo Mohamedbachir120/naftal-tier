@@ -15,13 +15,13 @@ declare module '@fastify/jwt' {
   interface FastifyJWT {
     payload: {
       id: string;
-      email: string;
+      phone: string;
       role: 'USER' | 'SELLER' | 'ADMIN';
       status: 'PENDING' | 'APPROVED' | 'REJECTED';
     };
     user: {
       id: string;
-      email: string;
+      phone: string;
       role: 'USER' | 'SELLER' | 'ADMIN';
       status: 'PENDING' | 'APPROVED' | 'REJECTED';
     };

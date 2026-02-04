@@ -4,36 +4,62 @@ import { CreateRequestInput } from './requests.schema.js';
 import { qrUtils } from '../../utils/qr.js';
 import { quotaUtils } from '../../utils/quotas.js';
 import { RequestStatus } from '@prisma/client';
+import * as crypto from 'crypto';
 
 export class RequestsService {
   constructor(private fastify: FastifyInstance) {}
 
+  // Helper to access Redis without Type errors
+  private get redis() {
+    return (this.fastify as any).redis;
+  }
+
+  // Helper to sync Redis after SQL updates
+  private async updateRedisStock(stationId: string, tireId: string, newQuantity: number) {
+    try {
+      const key = `station:${stationId}:tire:${tireId}:stock`;
+      await this.redis.set(key, newQuantity.toString());
+    } catch (err) {
+      this.fastify.log.error(err, `Failed to update Redis for ${stationId}/${tireId}`);
+    }
+  }
+
   async createRequest(userId: string, input: CreateRequestInput) {
-    // Check user status
+    // 1. Guard Clause: Check existence
+    if (!input.stationId) {
+      throw new Error('Station ID is required to create a request');
+    }
+
+    // Capture constants for strict typing inside closure
+    const stationId = input.stationId;
+    const tireId = input.tireId;
+    const quantity = input.quantity;
+
+    // 2. Check user status
     const user = await this.fastify.prisma.user.findUnique({
       where: { id: userId },
     });
 
-    if (!user || user.status !== 'APPROVED') {
-      throw new Error('Your account must be approved to make requests');
+    if (!user || !user.isVerified) {
+      throw new Error('Your account must be verified (Carte Grise approved) to make requests');
     }
 
-    // Get tire info
+    // 3. Get tire info
     const tire = await this.fastify.prisma.tire.findUnique({
-      where: { id: input.tireId },
+      where: { id: tireId },
     });
 
     if (!tire) {
-      throw new Error('Tire not found');
+      throw new Error('Tire definition not found');
     }
 
-    // Check quota
+    // 4. Check Quota
     const currentYear = new Date().getFullYear();
     const quotaCheck = await quotaUtils.checkQuotaAvailability(
       this.fastify.prisma,
       userId,
       tire.type,
-      input.quantity,
+      quantity,
       currentYear
     );
 
@@ -43,46 +69,92 @@ export class RequestsService {
       );
     }
 
-    // Generate QR code
-    const tempRequestId = crypto.randomUUID();
-    const { hash } = qrUtils.generateQRData(tempRequestId, userId, input.tireId);
+    // 5. THE CRITICAL TRANSACTION
+    let request;
+    let finalStockCount = 0;
 
-    // Create request with status history
-    const request = await this.fastify.prisma.tireRequest.create({
-      data: {
-        userId,
-        tireId: input.tireId,
-        stationId: input.stationId,
-        status: 'EN_ATTENTE',
-        qrCodeHash: hash,
-        year: currentYear,
-        quantity: input.quantity,
-        statusHistory: {
-          create: {
-            status: 'EN_ATTENTE',
-            changedBy: userId,
-            note: 'Request created',
+    try {
+      request = await this.fastify.prisma.$transaction(async (tx) => {
+        // A. ATOMIC UPDATE
+        const updateResult = await tx.stationInventory.updateMany({
+          where: {
+            stationId: stationId, 
+            tireId: tireId,
+            quantity: { gte: quantity }
           },
-        },
-      },
-      include: {
-        tire: true,
-        station: true,
-        statusHistory: {
-          orderBy: { createdAt: 'desc' },
-        },
-      },
-    });
+          data: {
+            quantity: { decrement: quantity }
+          }
+        });
 
-    // Generate QR code image
-    const qrCodeImage = await qrUtils.generateQRCodeImage(hash);
+        if (updateResult.count === 0) {
+          throw new Error('OUT_OF_STOCK');
+        }
+
+        // B. Fetch new stock level
+        const inventory = await tx.stationInventory.findUnique({
+          where: { 
+            stationId_tireId: { 
+              stationId: stationId,
+              tireId: tireId 
+            } 
+          }
+        });
+        finalStockCount = inventory?.quantity || 0;
+
+        // C. Generate QR (Local scope only)
+        const tempRequestId = crypto.randomUUID();
+        const qrData = qrUtils.generateQRData(tempRequestId, userId, tireId);
+        const qrHash = qrData.hash;
+
+        // D. Create Request
+        return await tx.tireRequest.create({
+          data: {
+            userId,
+            tireId: tireId,
+            stationId: stationId,
+            status: 'EN_ATTENTE',
+            qrCodeHash: qrHash,
+            year: currentYear,
+            quantity: quantity,
+            statusHistory: {
+              create: {
+                status: 'EN_ATTENTE',
+                changedBy: userId,
+                note: 'Request created',
+              },
+            },
+          },
+          include: {
+            tire: true,
+            station: true,
+            statusHistory: {
+              orderBy: { createdAt: 'desc' },
+            },
+          },
+        });
+      });
+    } catch (error: any) {
+      if (error.message === 'OUT_OF_STOCK') {
+        await this.updateRedisStock(stationId, tireId, 0);
+        throw new Error('Sorry, this tire just sold out at this station.');
+      }
+      throw error;
+    }
+
+    // 6. Update Redis
+    this.updateRedisStock(stationId, tireId, finalStockCount);
+
+    // 7. Generate QR Image
+    // FIX: Use the hash from the created request object (It is guaranteed to be a string)
+    const qrCodeImage = await qrUtils.generateQRCodeImage(request.qrCodeHash);
 
     return {
       request,
       qrCodeImage,
       quotaInfo: {
-        used: quotaCheck.used + input.quantity,
-        remaining: quotaCheck.remaining - input.quantity,
+        used: quotaCheck.used + quantity,
+        remaining: quotaCheck.remaining - quantity,
         max: quotaCheck.max,
       },
     };
@@ -137,7 +209,6 @@ export class RequestsService {
       throw new Error('Request not found');
     }
 
-    // Generate QR code image
     const qrCodeImage = await qrUtils.generateQRCodeImage(request.qrCodeHash);
 
     return {
@@ -157,8 +228,8 @@ export class RequestsService {
             id: true,
             firstName: true,
             lastName: true,
-            email: true,
             phone: true,
+            isVerified: true
           },
         },
         statusHistory: {
@@ -176,28 +247,65 @@ export class RequestsService {
     changedBy: string,
     note?: string
   ) {
-    const request = await this.fastify.prisma.tireRequest.update({
-      where: { id: requestId },
-      data: {
-        status,
-        ...(status === 'LIVRE' && { deliveredAt: new Date(), qrUsed: true }),
-        statusHistory: {
-          create: {
-            status,
-            changedBy,
-            note,
+    const result = await this.fastify.prisma.$transaction(async (tx) => {
+      
+      const currentRequest = await tx.tireRequest.findUnique({
+        where: { id: requestId },
+        select: { status: true, stationId: true, tireId: true, quantity: true }
+      });
+
+      if (!currentRequest) throw new Error("Request not found");
+
+      // Logic: If Cancelling, return stock
+      if (status === 'ANNULE' && currentRequest.status !== 'ANNULE' && currentRequest.status !== 'LIVRE') {
+        if (currentRequest.stationId) {
+            await tx.stationInventory.update({
+                where: { 
+                    stationId_tireId: { 
+                        stationId: currentRequest.stationId, 
+                        tireId: currentRequest.tireId 
+                    } 
+                },
+                data: { quantity: { increment: currentRequest.quantity } }
+            });
+        }
+      }
+
+      const updatedRequest = await tx.tireRequest.update({
+        where: { id: requestId },
+        data: {
+          status,
+          ...(status === 'LIVRE' && { deliveredAt: new Date(), qrUsed: true }),
+          statusHistory: {
+            create: {
+              status,
+              changedBy,
+              note,
+            },
           },
         },
-      },
-      include: {
-        tire: true,
-        station: true,
-        statusHistory: {
-          orderBy: { createdAt: 'desc' },
+        include: {
+          tire: true,
+          station: true,
+          statusHistory: {
+            orderBy: { createdAt: 'desc' },
+          },
         },
-      },
+      });
+
+      return updatedRequest;
     });
 
-    return request;
+    // Sync Redis if canceled
+    if (status === 'ANNULE' && result.stationId) {
+        const freshStock = await this.fastify.prisma.stationInventory.findUnique({
+             where: { stationId_tireId: { stationId: result.stationId, tireId: result.tireId } }
+        });
+        if (freshStock) {
+            this.updateRedisStock(result.stationId, result.tireId, freshStock.quantity);
+        }
+    }
+
+    return result;
   }
 }
