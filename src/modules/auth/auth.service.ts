@@ -2,15 +2,17 @@
 import { FastifyInstance } from 'fastify';
 import { RegisterInput, LoginInput } from './auth.schema.js';
 import { cryptoUtils } from '../../utils/crypto.js';
+import { Readable } from 'stream';
+
 // Removed UserStatus import, using boolean isVerified instead
 
 export class AuthService {
-  constructor(private fastify: FastifyInstance) {}
+  constructor(private fastify: FastifyInstance) { }
 
   async register(
     input: RegisterInput, // Assumes input now has: firstName, lastName, phone, password
     files: {
-      carteGriseDoc?: { filename: string; stream: NodeJS.ReadableStream; mimetype: string };
+      carteGriseDoc?: { filename: string; stream: Readable; mimetype: string };
     }
   ) {
     // 1. Check if user already exists (By PHONE, not Email)
@@ -25,13 +27,13 @@ export class AuthService {
     // 2. Hash Password (No encryption needed for NIN/CardID anymore)
     // Note: If you allow waitlist users to register later, you might handle empty passwords here, 
     // but for now we assume standard registration.
-    const passwordHash = input.password 
-      ? await cryptoUtils.hashPassword(input.password) 
+    const passwordHash = input.password
+      ? await cryptoUtils.hashPassword(input.password)
       : null;
 
     // 3. Upload Document (Only Carte Grise is required now)
     let carteGriseDocPath: string | undefined;
-    let ocrResultText = ""; 
+    let ocrResultText = "";
 
     if (files.carteGriseDoc) {
       carteGriseDocPath = await this.fastify.storage.uploadFile(
@@ -43,7 +45,7 @@ export class AuthService {
       // TODO: Integrate your actual OCR Service here (e.g., Tesseract, Google Vision)
       // For now, we simulate extraction.
       // ocrResultText = await this.ocrService.extractText(carteGriseDocPath);
-      ocrResultText = "OCR_PENDING_EXTRACTION"; 
+      ocrResultText = "OCR_PENDING_EXTRACTION";
     }
 
     // 4. Create user
@@ -53,12 +55,12 @@ export class AuthService {
         lastName: input.lastName,
         phone: input.phone,
         passwordHash,
-        
+
         // Document & OCR Data
         carteGriseDocPath,
         carteGriseRawOCR: ocrResultText, // Immutable Audit log
         carteGriseNum: ocrResultText,    // Editable active number (initially same as OCR)
-        
+
         // Defaults
         isVerified: false, // Replaces status: PENDING
         role: 'USER',
@@ -134,8 +136,8 @@ export class AuthService {
     // Logic updated for boolean isVerified
     return {
       isVerified: user.isVerified,
-      message: user.isVerified 
-        ? 'Your account is verified. You can make tire requests.' 
+      message: user.isVerified
+        ? 'Your account is verified. You can make tire requests.'
         : 'Your registration is pending verification of your Carte Grise.',
       registeredAt: user.createdAt,
       lastUpdated: user.updatedAt,

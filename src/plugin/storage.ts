@@ -5,6 +5,7 @@ import * as Minio from 'minio';
 import * as fs from 'fs';
 import * as path from 'path';
 import { pipeline } from 'stream/promises';
+import { Readable } from 'stream';
 
 interface StorageConfig {
   useMinIO: boolean;
@@ -20,7 +21,7 @@ interface StorageConfig {
 }
 
 interface StorageService {
-  uploadFile: (filename: string, stream: NodeJS.ReadableStream, contentType: string) => Promise<string>;
+  uploadFile: (filename: string, stream: Readable, contentType: string) => Promise<string>;
   getFile: (filename: string) => Promise<Buffer>;
   deleteFile: (filename: string) => Promise<void>;
   getFileUrl: (filename: string) => string;
@@ -65,7 +66,7 @@ const storagePlugin: FastifyPluginAsync<StorageConfig> = async (fastify, opts) =
   }
 
   const storage: StorageService = {
-    async uploadFile(filename: string, stream: NodeJS.ReadableStream, contentType: string): Promise<string> {
+    async uploadFile(filename: string, stream: Readable, contentType: string): Promise<string> {
       const uniqueFilename = `${Date.now()}-${filename}`;
 
       if (config.useMinIO && minioClient) {
